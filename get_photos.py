@@ -9,6 +9,9 @@ CHANNEL_USERNAME = "vyshegolovynsk"
 GITHUB_USER = "feskoloool"
 GITHUB_REPO = "2gis-reviews"
 
+# Сколько страниц истории пролистать назад (каждая страница — около 15-20 постов)
+PAGES_TO_FETCH = 5
+
 IMAGES_DIR = "images"
 OUTPUT_FILE = "photos.json"
 
@@ -19,29 +22,74 @@ headers = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-print(f"Подключение к Telegram-каналу t.me/{CHANNEL_USERNAME}...")
-url = f"https://t.me/s/{CHANNEL_USERNAME}"
-response = requests.get(url, headers=headers, timeout=15)
+print(f"Подключение к каналу t.me/{CHANNEL_USERNAME}...")
 
-if response.status_code != 200:
-    print(f"Ошибка доступа к каналу: код {response.status_code}")
-    exit(1)
+all_blocks = []
+seen_post_ids = set()
+before_param = ""
 
-page_html = response.text
-raw_posts = page_html.split('<div class="tgme_widget_message ')
-print(f"Найдено постов в ленте: {len(raw_posts) - 1}")
+for page in range(1, PAGES_TO_FETCH + 1):
+    url = f"https://t.me/s/{CHANNEL_USERNAME}"
+    if before_param:
+        url += f"?before={before_param}"
+
+    print(f"Загрузка страницы {page}/{PAGES_TO_FETCH} ({url})...")
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            print(f"  Ошибка загрузки страницы: код {response.status_code}")
+            break
+    except Exception as e:
+        print(f"  Ошибка запроса: {e}")
+        break
+
+    page_html = response.text
+    blocks = page_html.split('<div class="tgme_widget_message ')
+    if len(blocks) <= 1:
+        print("  Посты на странице не найдены.")
+        break
+
+    # Находим самый ранний номер поста на странице, чтобы листать дальше назад
+    found_post_ids = [int(m) for m in re.findall(rf'data-post="{CHANNEL_USERNAME}/(\d+)"', page_html)]
+    
+    # Добавляем новые блоки без дубликатов
+    new_blocks_count = 0
+    for block in blocks[1:]:
+        post_id_match = re.search(rf'data-post="{CHANNEL_USERNAME}/(\d+)"', block)
+        if post_id_match:
+            pid = post_id_match.group(1)
+            if pid not in seen_post_ids:
+                seen_post_ids.add(pid)
+                all_blocks.append(block)
+                new_blocks_count += 1
+        else:
+            all_blocks.append(block)
+            new_blocks_count += 1
+
+    print(f"  Найдено новых постов: {new_blocks_count}")
+
+    if not found_post_ids:
+        break
+
+    min_id = min(found_post_ids)
+    if str(min_id) == before_param:
+        # Дошли до самого начала канала
+        break
+    before_param = str(min_id)
+
+print(f"\nВсего собрано уникальных записей: {len(all_blocks)}")
 
 projects = []
 photo_global_counter = 1
 
-for block in raw_posts[1:]:
+for block in all_blocks:
     # 1. Пропускаем посты с видео
     if ("tgme_widget_message_video" in block or 
         "<video" in block or 
         "tgme_widget_message_roundvideo" in block):
         continue
 
-    # 2. Поиск картинок в сообщении
+    # 2. Ищем фотографии в посте
     img_urls = re.findall(r'class="[^"]*tgme_widget_message_photo_wrap[^"]*"[^>]*style="[^"]*background-image:\s*url\([\'"]?([^\'")]+)[\'"]?\)', block)
     if not img_urls:
         found = re.findall(r'background-image:\s*url\([\'"]?(https://[^\'")]+)[\'"]?\)', block)
@@ -85,15 +133,14 @@ for block in raw_posts[1:]:
                 current_post_photos.append(web_url)
                 photo_global_counter += 1
         except Exception as e:
-            print(f"  [-] Ошибка при скачивании фото: {e}")
+            print(f"  [-] Ошибка скачивания фото: {e}")
 
     if not current_post_photos:
         continue
 
-    # Если Telegram разбил альбом на несколько сообщений с одинаковым текстом — объединяем их
+    # Если текст совпадает с предыдущим объектом (альбом разбит на несколько постов)
     if projects and caption and projects[-1]["caption"] == caption:
         projects[-1]["photos"].extend(current_post_photos)
-        print(f"  [+] Добавлено {len(current_post_photos)} фото к уже существующему объекту: {caption[:30]}...")
     else:
         projects.append({
             "id": len(projects) + 1,
@@ -101,9 +148,8 @@ for block in raw_posts[1:]:
             "date": date_str,
             "photos": current_post_photos
         })
-        print(f"  [+] Создан новый объект ({len(current_post_photos)} фото): {caption[:30]}...")
 
-# Свежие работы сверху
+# Свежие работы показываем сверху
 projects.reverse()
 
 payload = {
@@ -116,4 +162,4 @@ payload = {
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(payload, f, ensure_ascii=False, indent=2)
 
-print(f"\nГотово! Сформировано объектов: {len(projects)}. Файл {OUTPUT_FILE} успешно обновлен.")
+print(f"\nГотово! Сформировано проектов: {len(projects)}. Сохранено в {OUTPUT_FILE}")
