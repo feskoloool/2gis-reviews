@@ -5,7 +5,6 @@ import html
 import requests
 from datetime import datetime
 
-# Настройки под ваш канал и репозиторий
 CHANNEL_USERNAME = "vyshegolovynsk"
 GITHUB_USER = "feskoloool"
 GITHUB_REPO = "2gis-reviews"
@@ -20,7 +19,7 @@ headers = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-print(f"Подключение к каналу t.me/{CHANNEL_USERNAME}...")
+print(f"Подключение к Telegram-каналу t.me/{CHANNEL_USERNAME}...")
 url = f"https://t.me/s/{CHANNEL_USERNAME}"
 response = requests.get(url, headers=headers, timeout=15)
 
@@ -32,27 +31,26 @@ page_html = response.text
 raw_posts = page_html.split('<div class="tgme_widget_message ')
 print(f"Найдено постов в ленте: {len(raw_posts) - 1}")
 
-gallery_items = []
-photo_counter = 1
+projects = []
+photo_global_counter = 1
 
 for block in raw_posts[1:]:
-    # 1. СТРОГО ПРОПУСКАЕМ ВИДЕО (обычные видеоролики и кружочки)
+    # 1. Пропускаем посты с видео
     if ("tgme_widget_message_video" in block or 
         "<video" in block or 
         "tgme_widget_message_roundvideo" in block):
         continue
 
-    # 2. Ищем фотографии в посте
+    # 2. Поиск картинок в сообщении
     img_urls = re.findall(r'class="[^"]*tgme_widget_message_photo_wrap[^"]*"[^>]*style="[^"]*background-image:\s*url\([\'"]?([^\'")]+)[\'"]?\)', block)
     if not img_urls:
-        # Резервный поиск, исключая аватарки авторов
         found = re.findall(r'background-image:\s*url\([\'"]?(https://[^\'")]+)[\'"]?\)', block)
         img_urls = [u for u in found if "userpic" not in u and "avatar" not in u]
 
     if not img_urls:
         continue
 
-    # 3. Извлекаем подпись к фотографии
+    # 3. Извлечение текста (адреса и описания)
     caption = ""
     caption_match = re.search(r'<div class="[^"]*tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
     if caption_match:
@@ -61,7 +59,7 @@ for block in raw_posts[1:]:
         clean_text = re.sub(r'<[^>]+>', '', raw_text)
         caption = html.unescape(clean_text).strip()
 
-    # 4. Извлекаем дату
+    # 4. Извлечение даты
     date_str = ""
     time_match = re.search(r'<time\s+[^>]*datetime="([^"]+)"', block)
     if time_match:
@@ -71,9 +69,10 @@ for block in raw_posts[1:]:
         except Exception:
             date_str = time_match.group(1)[:10]
 
-    # 5. Скачиваем фотографии поста
+    # 5. Скачивание всех фотографий этого объекта
+    current_post_photos = []
     for img_url in img_urls:
-        filename = f"work_{photo_counter}.jpg"
+        filename = f"work_{photo_global_counter}.jpg"
         file_path = os.path.join(IMAGES_DIR, filename)
 
         try:
@@ -83,29 +82,38 @@ for block in raw_posts[1:]:
                     f.write(img_res.content)
 
                 web_url = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/{IMAGES_DIR}/{filename}"
-
-                gallery_items.append({
-                    "id": photo_counter,
-                    "url": web_url,
-                    "caption": caption if caption else "Натяжной потолок (работа выполнена)",
-                    "date": date_str
-                })
-                print(f"  [+] Скачано фото #{photo_counter}: {filename}")
-                photo_counter += 1
+                current_post_photos.append(web_url)
+                photo_global_counter += 1
         except Exception as e:
             print(f"  [-] Ошибка при скачивании фото: {e}")
 
-# Новые работы показываем первыми
-gallery_items.reverse()
+    if not current_post_photos:
+        continue
+
+    # Если Telegram разбил альбом на несколько сообщений с одинаковым текстом — объединяем их
+    if projects and caption and projects[-1]["caption"] == caption:
+        projects[-1]["photos"].extend(current_post_photos)
+        print(f"  [+] Добавлено {len(current_post_photos)} фото к уже существующему объекту: {caption[:30]}...")
+    else:
+        projects.append({
+            "id": len(projects) + 1,
+            "caption": caption if caption else "Натяжной потолок (выполненная работа)",
+            "date": date_str,
+            "photos": current_post_photos
+        })
+        print(f"  [+] Создан новый объект ({len(current_post_photos)} фото): {caption[:30]}...")
+
+# Свежие работы сверху
+projects.reverse()
 
 payload = {
     "channel": CHANNEL_USERNAME,
     "updated_at": datetime.utcnow().strftime("%d.%m.%Y %H:%M"),
-    "total_count": len(gallery_items),
-    "photos": gallery_items
+    "total_projects": len(projects),
+    "projects": projects
 }
 
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(payload, f, ensure_ascii=False, indent=2)
 
-print(f"\nГотово! Скачано фотографий: {len(gallery_items)}. Файл {OUTPUT_FILE} успешно создан.")
+print(f"\nГотово! Сформировано объектов: {len(projects)}. Файл {OUTPUT_FILE} успешно обновлен.")
