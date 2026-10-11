@@ -22,10 +22,9 @@ headers = {
     "Accept-Language": "ru-RU,ru;q=0.9",
 }
 
-print(f"Подключение к каналу t.me/{CHANNEL_USERNAME}...")
+print(f"Подключение к Telegram-каналу t.me/{CHANNEL_USERNAME}...")
 
-all_blocks = []
-seen_post_ids = set()
+raw_posts_dict = {}
 before_param = ""
 
 for page in range(1, PAGES_TO_FETCH + 1):
@@ -33,11 +32,11 @@ for page in range(1, PAGES_TO_FETCH + 1):
     if before_param:
         url += f"?before={before_param}"
 
-    print(f"Загрузка страницы {page}/{PAGES_TO_FETCH} ({url})...")
+    print(f"Загрузка страницы {page}/{PAGES_TO_FETCH}...")
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
-            print(f"  Ошибка загрузки страницы: код {response.status_code}")
+            print(f"  Ошибка загрузки: код {response.status_code}")
             break
     except Exception as e:
         print(f"  Ошибка запроса: {e}")
@@ -46,44 +45,36 @@ for page in range(1, PAGES_TO_FETCH + 1):
     page_html = response.text
     blocks = page_html.split('<div class="tgme_widget_message ')
     if len(blocks) <= 1:
-        print("  Посты на странице не найдены.")
         break
 
-    # Находим самый ранний номер поста на странице, чтобы листать дальше назад
-    found_post_ids = [int(m) for m in re.findall(rf'data-post="{CHANNEL_USERNAME}/(\d+)"', page_html)]
-    
-    # Добавляем новые блоки без дубликатов
-    new_blocks_count = 0
+    page_post_ids = []
     for block in blocks[1:]:
         post_id_match = re.search(rf'data-post="{CHANNEL_USERNAME}/(\d+)"', block)
         if post_id_match:
-            pid = post_id_match.group(1)
-            if pid not in seen_post_ids:
-                seen_post_ids.add(pid)
-                all_blocks.append(block)
-                new_blocks_count += 1
-        else:
-            all_blocks.append(block)
-            new_blocks_count += 1
+            pid = int(post_id_match.group(1))
+            page_post_ids.append(pid)
+            if pid not in raw_posts_dict:
+                raw_posts_dict[pid] = block
 
-    print(f"  Найдено новых постов: {new_blocks_count}")
-
-    if not found_post_ids:
+    if not page_post_ids:
         break
 
-    min_id = min(found_post_ids)
+    min_id = min(page_post_ids)
     if str(min_id) == before_param:
-        # Дошли до самого начала канала
         break
     before_param = str(min_id)
 
-print(f"\nВсего собрано уникальных записей: {len(all_blocks)}")
+print(f"Всего получено уникальных постов: {len(raw_posts_dict)}")
+
+# Сортируем посты по возрастанию ID для корректной склейки альбомов
+sorted_post_ids = sorted(raw_posts_dict.keys())
 
 projects = []
-photo_global_counter = 1
 
-for block in all_blocks:
-    # 1. Пропускаем посты с видео
+for pid in sorted_post_ids:
+    block = raw_posts_dict[pid]
+
+    # 1. Пропускаем посты с видео и кружочками
     if ("tgme_widget_message_video" in block or 
         "<video" in block or 
         "tgme_widget_message_roundvideo" in block):
@@ -98,7 +89,7 @@ for block in all_blocks:
     if not img_urls:
         continue
 
-    # 3. Извлечение текста (адреса и описания)
+    # 3. Извлечение текста (адрес и описание)
     caption = ""
     caption_match = re.search(r'<div class="[^"]*tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>', block, re.DOTALL)
     if caption_match:
@@ -117,40 +108,48 @@ for block in all_blocks:
         except Exception:
             date_str = time_match.group(1)[:10]
 
-    # 5. Скачивание всех фотографий этого объекта
-    current_post_photos = []
-    for img_url in img_urls:
-        filename = f"work_{photo_global_counter}.jpg"
+    # 5. Скачивание фотографий (с защитой от повторного скачивания)
+    post_photos = []
+    for idx, img_url in enumerate(img_urls, 1):
+        filename = f"work_{pid}_{idx}.jpg"
         file_path = os.path.join(IMAGES_DIR, filename)
 
-        try:
-            img_res = requests.get(img_url, headers=headers, timeout=15)
-            if img_res.status_code == 200:
-                with open(file_path, "wb") as f:
-                    f.write(img_res.content)
+        if not os.path.exists(file_path):
+            try:
+                res = requests.get(img_url, headers=headers, timeout=15)
+                if res.status_code == 200:
+                    with open(file_path, "wb") as f:
+                        f.write(res.content)
+            except Exception as e:
+                print(f"  [-] Ошибка скачивания фото {pid}: {e}")
 
-                web_url = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/{IMAGES_DIR}/{filename}"
-                current_post_photos.append(web_url)
-                photo_global_counter += 1
-        except Exception as e:
-            print(f"  [-] Ошибка скачивания фото: {e}")
+        if os.path.exists(file_path):
+            web_url = f"https://{GITHUB_USER}.github.io/{GITHUB_REPO}/{IMAGES_DIR}/{filename}"
+            post_photos.append(web_url)
 
-    if not current_post_photos:
+    if not post_photos:
         continue
 
-    # Если текст совпадает с предыдущим объектом (альбом разбит на несколько постов)
+    # Объединение одинаковых объектов (если один альбом разбит на несколько постов)
     if projects and caption and projects[-1]["caption"] == caption:
-        projects[-1]["photos"].extend(current_post_photos)
+        projects[-1]["photos"].extend(post_photos)
+        projects[-1]["post_id"] = pid
+        if date_str:
+            projects[-1]["date"] = date_str
     else:
         projects.append({
-            "id": len(projects) + 1,
+            "post_id": pid,
             "caption": caption if caption else "Натяжной потолок (выполненная работа)",
             "date": date_str,
-            "photos": current_post_photos
+            "photos": post_photos
         })
 
-# Свежие работы показываем сверху
-projects.reverse()
+# СТРОГАЯ СОРТИРОВКА: СВЕЖИЕ СВЕРХУ (по убыванию номера поста)
+projects.sort(key=lambda p: p["post_id"], reverse=True)
+
+# Переназначаем порядковые ID для слайдера
+for idx, proj in enumerate(projects, 1):
+    proj["id"] = idx
 
 payload = {
     "channel": CHANNEL_USERNAME,
@@ -162,4 +161,4 @@ payload = {
 with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
     json.dump(payload, f, ensure_ascii=False, indent=2)
 
-print(f"\nГотово! Сформировано проектов: {len(projects)}. Сохранено в {OUTPUT_FILE}")
+print(f"\nГотово! Сформировано проектов: {len(projects)} (порядок: свежие -> старые).")
