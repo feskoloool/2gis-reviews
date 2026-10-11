@@ -1,0 +1,34 @@
+name: Sync Telegram Photos
+
+on:
+  schedule:
+    # Запуск каждое утро в 08:00 по МСК (05:00 UTC)
+    - cron: '0 5 * * *'
+  workflow_dispatch: # Кнопка для ручного запуска в любое время
+
+jobs:
+  download-photos:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run photo parser
+        run: python get_photos.py
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add images photos.json
+          git diff --staged --quiet || (git commit -m "Auto-update Telegram photos" && git push)
